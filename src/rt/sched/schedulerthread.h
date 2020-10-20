@@ -580,7 +580,13 @@ namespace verona::rt
 #endif
           if (mute_map.size() != 0)
         {
+#ifndef USE_SYSTEMATIC_TESTING
           mute_map_scan(true);
+#else
+          const auto last = Scheduler::get().active_thread_count == 1;
+          mute_map_scan(!last);
+          assert(!(last && q.is_empty()));
+#endif
           continue;
         }
         // Enter sleep only when the queue doesn't contain any real cowns.
