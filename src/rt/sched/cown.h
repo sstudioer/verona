@@ -550,6 +550,7 @@ namespace verona::rt
             if (high_priority)
               next->backpressure_transition(Priority::High);
 
+            // TODO: this access to body may lead to use-after-free
             for (size_t i = 0; i < body->index; i++)
             {
               assert(body->cowns[i]->blocker == nullptr);
