@@ -527,42 +527,43 @@ namespace verona::rt
       const auto last = body->count - 1;
       assert(body->index <= last);
 
-      Cown** cowns;
-      const size_t cowns_size = sizeof(Cown*) * body->count;
-      {
-        cowns = (Cown**)alloc->alloc(cowns_size);
-        mempcpy(cowns, body->cowns, cowns_size);
-      }
       const auto high_priority = behaviour_requires_high_priority(body);
-
       for (; body->index < body->count; body->index++)
       {
-        MultiMessage* m = MultiMessage::make_message(alloc, body, epoch);
+        auto* m = MultiMessage::make_message(alloc, body, epoch);
         auto* next = body->cowns[body->index];
         Systematic::cout() << "MultiMessage " << m << ": fast requesting "
                            << next << ", index " << body->index << std::endl;
 
-        {
-          size_t index = body->index;
-          // Hold epoch in case priority needs to be raised after message is
-          // placed in queue. TODO: only hold if `high_priority` is true
-          Epoch e(alloc);
+        if (body->index > 0)
+          body->cowns[body->index - 1]->blocker = next;
 
+        // Send the message to the next cown. Return false if the fast send has
+        // been interrupted (the cown is already scheduled).
+        auto try_fast_send = [next, m]() -> bool {
           bool needs_scheduling = next->send<YesTransfer, YesTryFast>(m);
           if (!needs_scheduling)
-          {
             // Case 1: target cown was already scheduled.
             Systematic::cout()
               << "MultiMessage " << m << ": fast send interrupted" << std::endl;
 
-            if (high_priority)
-              next->backpressure_transition(Priority::High);
+          return needs_scheduling;
+        };
 
-            // TODO: incrementally set blocker to avoid memcpy
-            for (size_t i = 0; i < index; i++)
-              cowns[i]->blocker = cowns[i + 1];
-
-            break;
+        if (!high_priority)
+        {
+          if (!try_fast_send())
+            return;
+        }
+        else
+        {
+          // Hold epoch in case priority needs to be raised after message is
+          // placed in queue.
+          Epoch e(alloc);
+          if (!try_fast_send())
+          {
+            next->backpressure_transition(Priority::High);
+            return;
           }
         }
 
@@ -575,7 +576,7 @@ namespace verona::rt
             << "MultiMessage " << m
             << ": fast send complete, reschedule last cown" << std::endl;
           next->schedule();
-          break;
+          return;
         }
 
         // The cown was asleep, so we have acquired it now. Dequeue the
@@ -588,7 +589,6 @@ namespace verona::rt
         assert(m == m2);
         UNUSED(m2);
       }
-      alloc->dealloc(cowns, cowns_size);
     }
 
     /**
