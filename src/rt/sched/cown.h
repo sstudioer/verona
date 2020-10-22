@@ -527,7 +527,14 @@ namespace verona::rt
       const auto last = body->count - 1;
       assert(body->index <= last);
 
+      Cown** cowns;
+      const size_t cowns_size = sizeof(Cown*) * body->count;
+      {
+        cowns = (Cown**)alloc->alloc(cowns_size);
+        mempcpy(cowns, body->cowns, cowns_size);
+      }
       const auto high_priority = behaviour_requires_high_priority(body);
+
       for (; body->index < body->count; body->index++)
       {
         MultiMessage* m = MultiMessage::make_message(alloc, body, epoch);
@@ -536,6 +543,7 @@ namespace verona::rt
                            << next << ", index " << body->index << std::endl;
 
         {
+          size_t index = body->index;
           // Hold epoch in case priority needs to be raised after message is
           // placed in queue. TODO: only hold if `high_priority` is true
           Epoch e(alloc);
@@ -550,14 +558,11 @@ namespace verona::rt
             if (high_priority)
               next->backpressure_transition(Priority::High);
 
-            // TODO: this access to body may lead to use-after-free
-            for (size_t i = 0; i < body->index; i++)
-            {
-              assert(body->cowns[i]->blocker == nullptr);
-              body->cowns[i]->blocker = body->cowns[i + 1];
-            }
+            // TODO: incrementally set blocker to avoid memcpy
+            for (size_t i = 0; i < index; i++)
+              cowns[i]->blocker = cowns[i + 1];
 
-            return;
+            break;
           }
         }
 
@@ -570,7 +575,7 @@ namespace verona::rt
             << "MultiMessage " << m
             << ": fast send complete, reschedule last cown" << std::endl;
           next->schedule();
-          return;
+          break;
         }
 
         // The cown was asleep, so we have acquired it now. Dequeue the
@@ -583,6 +588,7 @@ namespace verona::rt
         assert(m == m2);
         UNUSED(m2);
       }
+      alloc->dealloc(cowns, cowns_size);
     }
 
     /**
