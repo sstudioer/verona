@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.19.0)
+cmake_minimum_required(VERSION 3.13.0)
 
 # Need this to enable update-dump target.
-cmake_policy(SET CMP0114 NEW)
+#cmake_policy(SET CMP0114 NEW)
 
 # CMAKE_HOME_DIRECTORY should not be passed down to another project.
 set (VERONA_DONT_PASS CMAKE_HOME_DIRECTORY)
@@ -12,6 +12,8 @@ endmacro ()
 
 option_top (VERONA_DOWNLOAD_LLVM "Download cached version of LLVM" ON)
 option_top (VERBOSE_LLVM_DOWNLOAD "Verbose LLVM/MLIR download step" OFF)
+
+enable_testing()
 
 message (STATUS "Download LLVM: ${VERONA_DOWNLOAD_LLVM}")
 # Lifted from snmalloc. Hard to include with external projects, so copied
@@ -65,6 +67,9 @@ if (NOT MSVC)
   option(CMAKE_EXPORT_COMPILE_COMMANDS "Export compilation commands" ON)
 endif ()
 
+IF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+  SET(CMAKE_INSTALL_PREFIX ${CMAKE_BINARY_DIR}/dist CACHE PATH "Default to installing inside build dir" FORCE)
+ENDIF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 
 # This is to trick the CMake into building LLVM before Verona.
 # We use two External Projects, so that the LLVM build can complete and install
@@ -172,8 +177,7 @@ if (NOT DEFINED VERONA_LLVM_LOCATION)
     USES_TERMINAL_TEST true
     CMAKE_ARGS ${VERONA_EXTRA_CMAKE_ARGS})
 
-#  ExternalProject_Add_StepTargets(verona update-dump)
-#  add_custom_target(update-dump DEPENDS verona-update-dump)
+  add_subdirectory(testsuite)
 
   if (${SEPARATE_TEST_TARGET})
     ExternalProject_Add_StepTargets(verona test)
@@ -193,12 +197,6 @@ if (VERONA_CI_BUILD)
   set (CMAKE_POLICY_DEFAULT_CMP0077 NEW)
   set (SNMALLOC_CI_BUILD ON)
 endif ()
-
-IF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-  SET(CMAKE_INSTALL_PREFIX ${CMAKE_BINARY_DIR}/dist CACHE PATH "Default to installing inside build dir" FORCE)
-ENDIF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-
-enable_testing()
 
 # Copied from LLVM, handling release builds with assertions isn't trivial as
 # CMake defines -DNDEBUG automatically and we have to clear it.
@@ -244,4 +242,3 @@ add_library(cpp-peglib INTERFACE)
 target_include_directories(cpp-peglib INTERFACE external/cpp-peglib)
 
 add_subdirectory(src)
-add_subdirectory(testsuite)
