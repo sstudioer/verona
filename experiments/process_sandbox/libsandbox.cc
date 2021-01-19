@@ -27,16 +27,8 @@
 #    include <sys/capsicum.h>
 #  endif
 #  ifdef USE_KQUEUE_PROCDESC
-#    include <sys/procdesc.h>
-#  endif
-#  if defined(USE_KQUEUE) || defined(USE_KQUEUE_PROCDESC)
 #    include <sys/event.h>
-#  endif
-#  ifndef USE_KQUEUE
-#    include <poll.h>
-#    ifndef INFTIM
-#      define INFTIM -1
-#    endif
+#    include <sys/procdesc.h>
 #  endif
 #  ifdef __linux__
 #    include <bsd/unistd.h>
@@ -72,182 +64,15 @@ namespace sandbox
   class MemoryServiceProvider
   {
     snmalloc::DefaultChunkMap<> pm;
-#ifdef USE_KQUEUE
-    /**
-     * The kqueue used to wait for pagemap updates from the child.  Multiple
-     * threads can safely update a kqueue concurrently, so we don't need any
-     * other synchronisation in this page.
-     */
-    int kq = kqueue();
+    platform::Poller poller;
     /**
      * Add a new socket that we'll wait for.  This can be called from any
      * thread without synchronisation.
      */
     void register_fd(int socket_fd)
     {
-      struct kevent event;
-      EV_SET(&event, socket_fd, EVFILT_READ, EV_ADD, 0, 0, nullptr);
-      if (kevent(kq, &event, 1, nullptr, 0, nullptr) == -1)
-      {
-        err(1, "Setting up kqueue");
-      }
+      poller.add(socket_fd);
     }
-    /**
-     * Wait for an update from a child process.  This blocks and returns true
-     * if there is a message, false if an error occurred.  On success, `fd`
-     * will be set to the file descriptor associated with the event and `eof`
-     * will be set to true if the socket has been closed at the remote end,
-     * false otherwise.
-     *
-     * This is called only by the thread spawned by this class.
-     */
-    bool poll(int& fd, bool& eof)
-    {
-      struct kevent event;
-      if (kevent(kq, nullptr, 0, &event, 1, nullptr) == -1)
-      {
-        return false;
-      }
-      fd = static_cast<int>(event.ident);
-      eof = (event.flags & EV_EOF) == EV_EOF;
-      return true;
-    }
-#elif defined(__unix)
-    /**
-     * Mutex that protects the metadata about registered file descriptors.
-     */
-    std::mutex fds_lock;
-    /**
-     * Vector of all file descriptors that we're waiting for.
-     */
-    std::unordered_set<int> fds;
-    /**
-     * Wrapper around a pair of fie descriptors defining endpoints of a pipe.
-     * We use this to fall out of a `poll` call when the file descriptors
-     * vector has been updated.
-     */
-    struct pipepair
-    {
-      /**
-       * The read end of the pipe (by convention - the pipe is bidirectional).
-       */
-      int in;
-      /**
-       * The write end of the pipe (by convention - the pipe is bidirectional).
-       */
-      int out;
-      /**
-       * Open the pipe and initialise the descriptors.
-       */
-      pipepair()
-      {
-        int p[2] = {-1, -1};
-        pipe(p);
-        in = p[0];
-        out = p[1];
-      }
-      /**
-       * Destroy the pipe by closing both descriptors.
-       */
-      ~pipepair()
-      {
-        close(in);
-        close(out);
-      }
-    } pipes;
-    /**
-     * Register a file descriptor.  This may be called from any thread.
-     */
-    void register_fd(int socket_fd)
-    {
-      // With the lock held, add this to our bookkeeping metadata.
-      {
-        std::lock_guard g(fds_lock);
-        fds.insert(socket_fd);
-      }
-      // Prod the polling end to wake up.
-      write(pipes.out, " ", 1);
-    }
-    std::queue<pollfd> ready_fds;
-    /**
-     * Wait for one of the events to be ready.
-     */
-    bool poll(int& fd, bool& eof)
-    {
-      // Put everything in a nested scope so that all destructors are run
-      // before the tail call.  This allows the compiler to perform tail-call
-      // elimination.
-      {
-        // Check if there's a cached result from a previous poll call and
-        // return it if so.
-        auto check_ready = [&]() {
-          if (!ready_fds.empty())
-          {
-            auto back = ready_fds.front();
-            fd = back.fd;
-            eof = (back.revents & POLLHUP);
-            ready_fds.pop();
-            return true;
-          }
-          return false;
-        };
-        if (check_ready())
-        {
-          return true;
-        }
-        // Construct the vector of pollfd structures.
-        std::vector<pollfd> pfds;
-        // Add the pipe so that we can be interrupted if the list of fds
-        // changes.
-        pfds.push_back({pipes.in, POLLRDNORM, 0});
-        {
-          std::lock_guard g(fds_lock);
-          for (int i : fds)
-          {
-            pfds.push_back({i, POLLRDNORM, 0});
-          }
-        }
-        if (::poll(pfds.data(), pfds.size(), INFTIM) == -1)
-        {
-          return false;
-        }
-        for (auto& pfd : pfds)
-        {
-          // If the pipe has some data, read it out so that we don't get woken
-          // up again next time.
-          if ((pfd.fd == pipes.in) && (pfd.revents & POLLRDNORM))
-          {
-            char buf[1];
-            read(pipes.in, buf, 1);
-            // Don't hand this one out to the caller!
-            continue;
-          }
-          // If we found one, push it into the cached list.
-          if (pfd.revents != 0)
-          {
-            ready_fds.push(pfd);
-          }
-          // If we found an fd that is closed, do cache it so we can send the
-          // eof result to the caller, but also remove it so that we don't try
-          // to poll for this one again.
-          if (pfd.revents & POLLHUP)
-          {
-            std::lock_guard g(fds_lock);
-            fds.erase(pfd.fd);
-          }
-        }
-        if (check_ready())
-        {
-          return true;
-        }
-      }
-      // If we were woken up by the pipe and didn't have any other
-      // notifications, try again.
-      return poll(fd, eof);
-    }
-#else
-#  error Event polling not implemented for this target.
-#endif
     /**
      * Mutex that protects the `ranges` map.
      */
@@ -279,7 +104,7 @@ namespace sandbox
     {
       int fd;
       bool eof;
-      while (poll(fd, eof))
+      while (poller.poll(fd, eof))
       {
         // If a child's socket closed, unmap its shared page and delete the
         // metadata that we have associated with it.
@@ -287,7 +112,6 @@ namespace sandbox
         {
           std::lock_guard g(m);
           auto r = ranges.find(fd);
-          munmap(r->second.shared_page, snmalloc::OS_PAGE_SIZE);
           ranges.erase(r);
           close(fd);
           continue;
@@ -445,9 +269,6 @@ namespace sandbox
      */
     MemoryServiceProvider()
     {
-#ifdef USE_KQUEUE
-      assert(kq >= 0);
-#endif
       std::thread t([&]() { run(); });
       t.detach();
     }
@@ -458,26 +279,14 @@ namespace sandbox
      * sandbox will send update requests.  `pagemap_fd` is the shared pagemap
      * page.
      */
-    uint8_t* add_range(
-      SharedMemoryProvider* memory_provider, int socket_fd, int pagemap_fd)
+    void add_range(
+      SharedMemoryProvider* memory_provider, int socket_fd, platform::SharedMemoryMap &page)
     {
-      uint8_t* shared_pagemap = static_cast<uint8_t*>(mmap(
-        nullptr,
-        snmalloc::OS_PAGE_SIZE,
-        PROT_READ | PROT_WRITE,
-        MAP_SHARED,
-        pagemap_fd,
-        0));
-      if (shared_pagemap == MAP_FAILED)
-      {
-        err(1, "Failed to map shared pagemap page");
-      }
       {
         std::lock_guard g(m);
-        ranges[socket_fd] = {memory_provider, shared_pagemap};
+        ranges[socket_fd] = {memory_provider, static_cast<uint8_t*>(page.get_base())};
       }
       register_fd(socket_fd);
-      return shared_pagemap;
     }
   };
   /**
@@ -673,12 +482,9 @@ namespace sandbox
      */
     SharedMemoryRegion();
     /**
-     * Destroy this shared memory region.  Unmaps the region.  Nothing in the
-     * `SharedMemoryRegion` structure is trusted and so this takes the `size`
-     * of the region as an explicit argument.  The parent is responsible for
-     * tracking this value in trusted memory.
+     * Tear down the parent-owned contents of this shared memory region.
      */
-    void destroy(size_t size);
+    void destroy();
   };
 
 #ifdef __unix__
@@ -728,11 +534,10 @@ namespace sandbox
     pthread_cond_init(&cv, &cvattrs);
   }
 
-  void SharedMemoryRegion::destroy(size_t size)
+  void SharedMemoryRegion::destroy()
   {
     pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&cv);
-    munmap(static_cast<void*>(this), size);
   }
 #else
 #  error Missing implementation of SharedMemoryRegion
@@ -742,8 +547,7 @@ namespace sandbox
   SandboxedLibrary::~SandboxedLibrary()
   {
     wait_for_child_exit();
-    shared_mem->destroy(shared_size);
-    close(shm_fd);
+    shared_mem->destroy();
     close(socket_fd);
 #  ifdef USE_KQUEUE_PROCDESC
     close(kq);
@@ -817,7 +621,7 @@ namespace sandbox
     };
     // Move all of the file descriptors that we're going to use out of the
     // region that we're going to populate.
-    shm_fd = move_fd(shm_fd);
+    int shm_fd = move_fd(shm.get_handle().fd);
     pagemap_mem = move_fd(pagemap_mem);
     fd_socket = move_fd(fd_socket);
     malloc_rpc_socket = move_fd(malloc_rpc_socket);
@@ -902,84 +706,34 @@ namespace sandbox
       sizeof(location),
       "SANDBOX_LOCATION=%zx:%zx",
       (size_t)sharedmem_addr,
-      (size_t)shared_size);
+      (size_t)shm.get_size());
     assert(loc_len < sizeof(location));
     static_assert(
       OtherLibraries == 8, "First entry in LD_LIBRARY_PATH_FDS is incorrect");
     static_assert(
       libdirfds.size() == 3,
       "Number of entries in LD_LIBRARY_PATH_FDS is incorrect");
-    const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location, nullptr};
+    //const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location, nullptr};
+    const char* const env[] = {location, nullptr};
     execve(librunnerpath, args, const_cast<char* const*>(env));
     // Should be unreachable, but just in case we failed to exec, don't return
     // from here (returning from a vfork context is very bad!).
     _exit(EXIT_FAILURE);
   }
 
-#  ifdef __FreeBSD__
-  SandboxedLibrary::handle_t SandboxedLibrary::mk_shm(const char*)
-  {
-    return shm_open(SHM_ANON, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-  };
-#  elif defined(__linux__)
-  SandboxedLibrary::handle_t SandboxedLibrary::mk_shm(const char* debug_name)
-  {
-    int ret = memfd_create(debug_name, 0);
-    // WSL doesn't support memfd, so do something ugly with temp files.
-    if (ret == -1)
-    {
-      char name[] = "/tmp/sandbox.shmXXXXXX";
-      ret = mkstemp(name);
-      // unlink(name);
-      assert(ret != -1);
-    }
-    return ret;
-  };
-#  else
-#    error Anonymous shared memory not implemented for your platform
-#  endif
-
-  void* SandboxedLibrary::allocate_shm()
-  {
-    shm_fd = mk_shm("sandbox");
-    // Set the size of the shared memory region.
-    ftruncate(shm_fd, shared_size);
-    // FIXME: Linux version will need to repeatedly try MAP_FIXED and
-    // MAP_EXCL until it finds a gap of the correct size, because Linux doesn't
-    // have MAP_ALIGNED
-    void* ptr = mmap(
-      0,
-      shared_size,
-      PROT_READ | PROT_WRITE,
-      MAP_ALIGNED(35) | MAP_SHARED | MAP_NOCORE,
-      shm_fd,
-      0);
-    if (ptr == MAP_FAILED)
-    {
-      err(1, "Map failed");
-      abort();
-    }
-    return ptr;
-  }
-
   SandboxedLibrary::SandboxedLibrary(const char* library_name, size_t size)
-  : shared_size(1024ULL * 1024ULL * 1024ULL * size),
-    shm_base(allocate_shm()),
+  : shm(snmalloc::bits::next_pow2_bits(size << 30)),
+    shared_pagemap(snmalloc::bits::next_pow2_bits(snmalloc::OS_PAGE_SIZE)),
     memory_provider(
-      pointer_offset(shm_base, sizeof(SharedMemoryRegion)),
-      shared_size - sizeof(SharedMemoryRegion))
+      pointer_offset(shm.get_base(), sizeof(SharedMemoryRegion)),
+      shm.get_size() - sizeof(SharedMemoryRegion))
   {
-    // Create a single page for the shared pagemap page.  The parent process
-    // will write to this directly, the child will send messages through a pipe
-    // to ask the parent to update it, but will read it directly.
-    int pagemap_fd = mk_shm("pagemap");
-    ftruncate(pagemap_fd, snmalloc::OS_PAGE_SIZE);
-
+    void* shm_base = shm.get_base();
     // Allocate the shared memory region and set its memory provider to use all
     // of the space after the end of the header for subsequent allocations.
     shared_mem = new (shm_base) SharedMemoryRegion();
     shared_mem->start = shm_base;
-    shared_mem->end = pointer_offset(shm_base, shared_size);
+    shared_mem->end = pointer_offset(shm.get_base(), shm.get_size());
 
     // Create a pair of sockets that we can use to
     int malloc_rpc_sockets[2];
@@ -987,8 +741,8 @@ namespace sandbox
     {
       err(1, "Failed to create socket pair");
     }
-    uint8_t* shared_pagemap_page = pagemap_owner().add_range(
-      &memory_provider, malloc_rpc_sockets[0], pagemap_fd);
+    pagemap_owner().add_range(
+      &memory_provider, malloc_rpc_sockets[0], shared_pagemap);
     // Construct a UNIX domain socket.  This will eventually be used to send
     // file descriptors from the parent to the child, but isn't yet.
     int socks[2];
@@ -1038,7 +792,7 @@ namespace sandbox
         library_name,
         librunnerpath,
         shm_base,
-        pagemap_fd,
+        shared_pagemap.get_handle().fd,
         malloc_rpc_sockets[1],
         socks[1]);
     }
@@ -1058,12 +812,11 @@ namespace sandbox
     // Close all of the file descriptors that only the child should have.
     close(socks[1]);
     close(malloc_rpc_sockets[1]);
-    close(pagemap_fd);
     socket_fd = socks[0];
     // Allocate an allocator in the shared memory region.
     allocator = new SharedAlloc(
       memory_provider,
-      SharedPagemapAdaptor(shared_pagemap_page),
+      SharedPagemapAdaptor(static_cast<uint8_t*>(shared_pagemap.get_base())),
       &shared_mem->allocator_state);
   }
   void SandboxedLibrary::send(int idx, void* ptr)

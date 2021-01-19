@@ -15,6 +15,8 @@
 
 #include <snmalloc.h>
 
+#include "platform.h"
+
 #ifndef SANDBOX_PAGEMAP
 #  ifdef SNMALLOC_DEFAULT_PAGEMAP
 #    define SANDBOX_PAGEMAP SNMALLOC_DEFAULT_PAGEMAP
@@ -150,11 +152,6 @@ namespace sandbox
      */
     SharedAlloc* allocator;
     /**
-     * The handle to the shared memory region that backs the sandboxed
-     * process's heap.
-     */
-    handle_t shm_fd;
-    /**
      * The handle to the socket that is used to pass file descriptors to the
      * sandboxed process.
      */
@@ -195,15 +192,16 @@ namespace sandbox
      * The exit code of the child.  This is set when the child process exits.
      */
     int child_status;
-    /**
-     * The size of the shared-memory region.
-     */
-    size_t shared_size;
 
-    /**
-     * The base address of the shared memory region.
-     */
-    void* shm_base;
+	/**
+	 * The shared memory object that contains the child process's heap.
+	 */
+	platform::SharedMemoryMap shm;
+	
+	/**
+	 * The shared pagemap page.
+	 */
+	platform::SharedMemoryMap shared_pagemap;
 
     /**
      * The (trusted) memory provider that is used to allocate large regions to
@@ -211,17 +209,6 @@ namespace sandbox
      * and via an RPC mechanism that checks arguments from inside.
      */
     SharedMemoryProvider memory_provider;
-
-    /**
-     * Helper that allocates a shared memory object.
-     */
-    handle_t mk_shm(const char* debug_name);
-
-    /**
-     * Helper that sets up the shared memory region.  Returns a pointer that is
-     * used to initialise `shm_base`.
-     */
-    void* allocate_shm();
 
     /**
      * Allocate some memory in the sandbox.  Returns `nullptr` if the
