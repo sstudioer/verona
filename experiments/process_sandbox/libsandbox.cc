@@ -26,14 +26,8 @@
 #  ifdef USE_CAPSICUM
 #    include <sys/capsicum.h>
 #  endif
-#  ifdef USE_KQUEUE_PROCDESC
-#    include <sys/event.h>
-#    include <sys/procdesc.h>
-#  endif
 #  ifdef __linux__
 #    include <bsd/unistd.h>
-#    define MAP_ALIGNED(x) 0
-#    define MAP_NOCORE 0
 #  endif
 #endif
 #include "host_service_calls.h"
@@ -280,11 +274,14 @@ namespace sandbox
      * page.
      */
     void add_range(
-      SharedMemoryProvider* memory_provider, int socket_fd, platform::SharedMemoryMap &page)
+      SharedMemoryProvider* memory_provider,
+      int socket_fd,
+      platform::SharedMemoryMap& page)
     {
       {
         std::lock_guard g(m);
-        ranges[socket_fd] = {memory_provider, static_cast<uint8_t*>(page.get_base())};
+        ranges[socket_fd] = {memory_provider,
+                             static_cast<uint8_t*>(page.get_base())};
       }
       register_fd(socket_fd);
     }
@@ -487,7 +484,6 @@ namespace sandbox
     void destroy();
   };
 
-#ifdef __unix__
   void SharedMemoryRegion::wait(bool expected)
   {
     pthread_mutex_lock(&mutex);
@@ -539,19 +535,12 @@ namespace sandbox
     pthread_mutex_destroy(&mutex);
     pthread_cond_destroy(&cv);
   }
-#else
-#  error Missing implementation of SharedMemoryRegion
-#endif
 
-#ifdef __unix__
   SandboxedLibrary::~SandboxedLibrary()
   {
     wait_for_child_exit();
     shared_mem->destroy();
     close(socket_fd);
-#  ifdef USE_KQUEUE_PROCDESC
-    close(kq);
-#  endif
   }
 
   /**
@@ -654,7 +643,7 @@ namespace sandbox
     {
       libfd = dup2(libfd, rtldfd++);
     }
-#  ifdef USE_CAPSICUM
+#ifdef USE_CAPSICUM
     // If we're compiling with Capsicum support, then restrict the permissions
     // on all of the file descriptors that are available to untrusted code.
     auto limit_fd = [&](int fd, auto... permissions) {
@@ -685,7 +674,7 @@ namespace sandbox
     {
       limit_fd(libfd, CAP_READ, CAP_FSTAT, CAP_LOOKUP, CAP_MMAP_RX);
     }
-#  endif
+#endif
     closefrom(last_fd);
     // Prepare the arguments to main.  These are going to be the binary name,
     // the address of the shared memory region, the length of the shared
@@ -713,8 +702,8 @@ namespace sandbox
     static_assert(
       libdirfds.size() == 3,
       "Number of entries in LD_LIBRARY_PATH_FDS is incorrect");
-    //const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location, nullptr};
-    const char* const env[] = {location, nullptr};
+    const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location,
+    nullptr};
     execve(librunnerpath, args, const_cast<char* const*>(env));
     // Should be unreachable, but just in case we failed to exec, don't return
     // from here (returning from a vfork context is very bad!).
@@ -747,7 +736,6 @@ namespace sandbox
     // file descriptors from the parent to the child, but isn't yet.
     int socks[2];
     socketpair(AF_UNIX, SOCK_STREAM, 0, socks);
-    int pid;
     std::string path = ".";
     std::string lib;
     // Use dladdr to find the path of the libsandbox shared library.  For now,
@@ -776,17 +764,7 @@ namespace sandbox
     library_name = lib.c_str();
     path += "/library_runner";
     const char* librunnerpath = path.c_str();
-    // We shouldn't do anything that modifies the heap (or reads the heap in
-    // a way that is not concurrency safe) between vfork and exec.
-    child_proc = -1;
-#  ifdef USE_KQUEUE_PROCDESC
-    pid = pdfork(&child_proc, PD_DAEMON | PD_CLOEXEC);
-#  else
-    child_proc = pid = vfork();
-    assert(child_proc != -1);
-#  endif
-    if (pid == 0)
-    {
+    child_proc = std::make_unique<platform::ChildProcess>([&]() {
       // In the child process.
       start_child(
         library_name,
@@ -795,20 +773,7 @@ namespace sandbox
         shared_pagemap.get_handle().fd,
         malloc_rpc_sockets[1],
         socks[1]);
-    }
-    // Only reachable in the parent process
-#  ifdef USE_KQUEUE_PROCDESC
-    // If we're using kqueue to monitor for child failure, construct a kqueue
-    // now and add this as the event that we'll monitor.  Otherwise, we'll use
-    // waitpid with the pid and don't need to maintain any in-kernel state.
-    kq = kqueue();
-    struct kevent event;
-    EV_SET(&event, child_proc, EVFILT_PROCDESC, EV_ADD, NOTE_EXIT, 0, nullptr);
-    if (kevent(kq, &event, 1, nullptr, 0, nullptr) == -1)
-    {
-      err(1, "Setting up kqueue");
-    }
-#  endif
+    });
     // Close all of the file descriptors that only the child should have.
     close(socks[1]);
     close(malloc_rpc_sockets[1]);
@@ -837,95 +802,21 @@ namespace sandbox
       }
     }
   }
-#  ifndef USE_KQUEUE_PROCDESC
-  namespace
-  {
-    std::pair<pid_t, int> waitpid(pid_t child_proc, int options)
-    {
-      pid_t ret;
-      int status;
-      bool retry = false;
-      do
-      {
-        ret = ::waitpid(child_proc, &status, options);
-        retry = (ret == -1) && (errno == EINTR);
-      } while (retry);
-      return {ret, status};
-    }
-  }
-#  endif
   bool SandboxedLibrary::has_child_exited()
   {
-#  ifdef USE_KQUEUE_PROCDESC
-    // If we're using kqueue and process descriptors then we
-    struct kevent event;
-    shared_mem->signal(true);
-    struct timespec timeout = {0, 0};
-    int ret = kevent(kq, nullptr, 0, &event, 1, &timeout);
-    if (ret == -1)
-    {
-      err(1, "Waiting for child failed");
-    }
-    if (ret == 1)
-    {
-      child_status = event.data;
-      child_exited = true;
-    }
-    return (ret == 1);
-#  else
-    auto [ret, status] = waitpid(child_proc, WNOHANG);
-    if (ret == -1)
-    {
-      err(1, "Waiting for child failed");
-    }
-    if (ret == child_proc)
-    {
-      child_status = WEXITSTATUS(status);
-      child_exited = true;
-      return true;
-    }
-    return false;
-#  endif
+    return child_proc->exit_status().has_exited;
   }
   int SandboxedLibrary::wait_for_child_exit()
   {
-    if (child_exited)
+    auto exit_status = child_proc->exit_status();
+    if (exit_status.has_exited)
     {
-      return child_status;
+      return exit_status.exit_code;
     }
     shared_mem->should_exit = true;
     shared_mem->signal(true);
-#  ifdef USE_KQUEUE_PROCDESC
-    struct kevent event;
-    // FIXME: Timeout and increase the aggression with which we kill the child
-    // process (SIGTERM, SIGKILL)
-    if (kevent(kq, nullptr, 0, &event, 1, nullptr) == -1)
-    {
-      err(1, "Waiting for child failed");
-      abort();
-    }
-    return event.data;
-#  else
-    // FIXME: Timeout and increase the aggression with which we kill the child
-    // process (SIGTERM, SIGKILL)
-    auto [ret, status] = waitpid(child_proc, 0);
-    if (ret == -1)
-    {
-      err(1, "Waiting for child failed");
-      abort();
-    }
-    if (ret == child_proc && (WIFEXITED(status) || WIFSIGNALED(status)))
-    {
-      child_status = WEXITSTATUS(status);
-      child_exited = true;
-      return true;
-    }
-    return false;
-#  endif
+    return child_proc->wait_for_exit().exit_code;
   }
-#else
-#  error Missing implementation of SandboxedLibrary
-#endif
 
   void* SandboxedLibrary::alloc_in_sandbox(size_t bytes, size_t count)
   {

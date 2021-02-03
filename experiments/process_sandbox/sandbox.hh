@@ -13,9 +13,9 @@
 #  include <unistd.h>
 #endif
 
-#include <snmalloc.h>
+#include "platform/platform.h"
 
-#include "platform.h"
+#include <snmalloc.h>
 
 #ifndef SANDBOX_PAGEMAP
 #  ifdef SNMALLOC_DEFAULT_PAGEMAP
@@ -103,29 +103,13 @@ namespace sandbox
    */
   class SandboxedLibrary
   {
-#ifdef __unix__
     /**
      * `handle_t` is the type used by the OS for handles to operating system
      * resources.  On *NIX systems, file descriptors are represented as
      * `int`s.
      */
-    using handle_t = int;
-#  ifdef __FreeBSD__
-    /**
-     * A handle to a process.  On FreeBSD, we spawn child processes using
-     * `pdfork` and so we have a process descriptor as the handle to a child
-     * process.
-     */
-    using process_handle_t = handle_t;
-#  else
-    /**
-     * A handle to a process.  On most *NIX systems, we use vfork to create the
-     * child and then use a pid (an index in a global namespace, not a local
-     * handle) to refer to it.
-     */
-    using process_handle_t = pid_t;
-#  endif
-#endif
+    using handle_t = platform::handle_t;
+
     SNMALLOC_FAST_PATH static bool needs_initialisation(void*)
     {
       return false;
@@ -157,16 +141,9 @@ namespace sandbox
      */
     handle_t socket_fd;
     /**
-     * The process ID or handle of the child process.  This is either a process
-     * descriptor (handle / capability) or a process ID in a global namespace.
+     * The platform-specific child process.
      */
-    process_handle_t child_proc;
-#ifdef USE_KQUEUE_PROCDESC
-    /**
-     * The queue used to watch for child exit.
-     */
-    int kq;
-#endif
+    std::unique_ptr<platform::ChildProcess> child_proc;
     /**
      * A pointer to the shared-memory region.  The start of this is structured,
      * the rest is an untyped region of memory that can be used to allocate
@@ -193,15 +170,15 @@ namespace sandbox
      */
     int child_status;
 
-	/**
-	 * The shared memory object that contains the child process's heap.
-	 */
-	platform::SharedMemoryMap shm;
-	
-	/**
-	 * The shared pagemap page.
-	 */
-	platform::SharedMemoryMap shared_pagemap;
+    /**
+     * The shared memory object that contains the child process's heap.
+     */
+    platform::SharedMemoryMap shm;
+
+    /**
+     * The shared pagemap page.
+     */
+    platform::SharedMemoryMap shared_pagemap;
 
     /**
      * The (trusted) memory provider that is used to allocate large regions to
