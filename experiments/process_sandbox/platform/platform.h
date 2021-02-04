@@ -7,6 +7,9 @@
  */
 
 #include <pal/pal.h>
+#ifdef __unix__
+#  include <fcntl.h>
+#endif
 
 #pragma once
 namespace sandbox
@@ -111,5 +114,5 @@ namespace sandbox
 
 #include "child_process.h"
 #include "poller.h"
-#include "shm.h"
 #include "sandbox.h"
+#include "shm.h"
