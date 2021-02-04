@@ -8,9 +8,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#ifdef USE_CAPSICUM
-#  include <sys/capsicum.h>
-#endif
 #include <aal/aal.h>
 #include <ds/bits.h>
 #include <pal/pal.h>
@@ -427,13 +424,6 @@ namespace sandbox
   class ExportedLibraryPrivate
   {
     friend class ExportedLibrary;
-#ifdef __unix__
-    /**
-     * The type used for handles to operating system resources.  On POSIX
-     * systems, file descriptors are `int`s (and everything is a file).
-     */
-    using handle_t = int;
-#endif
 
     /**
      * The socket that should be used for passing new file descriptors into
@@ -441,7 +431,7 @@ namespace sandbox
      *
      * Not implemented yet.
      */
-    __attribute__((unused)) handle_t socket_fd;
+    __attribute__((unused)) platform::handle_t socket_fd;
 
     /**
      * The shared memory region owned by this sandboxed library.
@@ -453,7 +443,7 @@ namespace sandbox
      * Constructor.  Takes the socket over which this process should receive
      * additional file descriptors and the shared memory region.
      */
-    ExportedLibraryPrivate(handle_t sock, SharedMemoryRegion* region)
+    ExportedLibraryPrivate(platform::handle_t sock, SharedMemoryRegion* region)
     : socket_fd(sock), shared_mem(region)
     {}
 
@@ -498,9 +488,6 @@ namespace
   SNMALLOC_SLOW_PATH
   void bootstrap()
   {
-#ifdef USE_CAPSICUM
-    cap_enter();
-#endif
     void* addr = nullptr;
     size_t length = 0;
     // Find the correct environment variables.  Note that libc is not fully
@@ -574,6 +561,8 @@ namespace
 
 int main()
 {
+  sandbox::platform::Sandbox sb;
+  sb.apply_sandboxing_policy();
   bootstrap_if_needed();
   // Close the shared memory region file descriptor before we call untrusted
   // code.

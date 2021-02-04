@@ -14,6 +14,7 @@
 #endif
 
 #include "platform/platform.h"
+#include "sandbox_fd_numbers.h"
 
 #include <snmalloc.h>
 
@@ -94,6 +95,7 @@ namespace sandbox
       return (ptr >= base) && (pointer_offset(ptr, sz) < top);
     }
   };
+
   /**
    * Class encapsulating an instance of a shared library in a sandbox.
    * Instances of this class will create a sandbox and load a specified library

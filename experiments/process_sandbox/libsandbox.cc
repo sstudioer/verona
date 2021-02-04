@@ -23,14 +23,12 @@
 #  include <sys/un.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
-#  ifdef USE_CAPSICUM
-#    include <sys/capsicum.h>
-#  endif
 #  ifdef __linux__
 #    include <bsd/unistd.h>
 #  endif
 #endif
 #include "host_service_calls.h"
+#include "platform/sandbox.h"
 #include "sandbox.hh"
 
 extern "C"
@@ -543,46 +541,6 @@ namespace sandbox
     close(socket_fd);
   }
 
-  /**
-   * The numbers for file descriptors passed into the child.  These must match
-   * between libsandbox and the library runner child process.
-   */
-  enum SandboxFileDescriptors
-  {
-    /**
-     * The file descriptor used for the shared memory object that contains the
-     * shared heap.
-     */
-    SharedMemRegion = 3,
-    /**
-     * The file descriptor for the shared memory object that contains the
-     * shared pagemap page.  This is mapped read-only in the child and updated
-     * in the parent.
-     */
-    PageMapPage,
-    /**
-     * The file descriptor for the socket used to pass file descriptors into the
-     * child.
-     */
-    FDSocket,
-    /**
-     * The file descriptor used for the main library.  This is passed to
-     * `fdlopen` in the child.
-     */
-    MainLibrary,
-    /**
-     * The file descriptor for the pipe used to send pagemap updates to the
-     * parent process.
-     */
-    PageMapUpdates,
-    /**
-     * The first file descriptor number used for directory descriptors of
-     * library directories.  These are used by rtld in the child to locate
-     * libraries that the library identified by `MainLibrary`depends on.
-     */
-    OtherLibraries
-  };
-
   void SandboxedLibrary::start_child(
     const char* library_name,
     const char* librunnerpath,
@@ -595,7 +553,7 @@ namespace sandbox
     // child as open directory descriptors for the run-time linker to use.
     std::array<const char*, 3> libdirs = {"/lib", "/usr/lib", "/usr/local/lib"};
     // The file descriptors for the directories in libdirs
-    std::array<int, libdirs.size()> libdirfds;
+    std::array<platform::handle_t, libdirs.size()> libdirfds;
     // The last file descriptor that we're going to use.  The `move_fd`
     // lambda will copy all file descriptors above this line so they can then
     // be copied into their desired location.
@@ -643,38 +601,8 @@ namespace sandbox
     {
       libfd = dup2(libfd, rtldfd++);
     }
-#ifdef USE_CAPSICUM
-    // If we're compiling with Capsicum support, then restrict the permissions
-    // on all of the file descriptors that are available to untrusted code.
-    auto limit_fd = [&](int fd, auto... permissions) {
-      cap_rights_t rights;
-      if (cap_rights_limit(fd, cap_rights_init(&rights, permissions...)) != 0)
-      {
-        err(1, "Failed to limit rights on file descriptor %d", fd);
-      }
-    };
-    // Standard in is read only
-    limit_fd(STDIN_FILENO, CAP_READ);
-    // Standard out and error are write only
-    limit_fd(STDOUT_FILENO, CAP_WRITE);
-    limit_fd(STDERR_FILENO, CAP_WRITE);
-    // The socket is used with a call-return protocol for requesting services
-    // for malloc.
-    limit_fd(malloc_rpc_socket, CAP_WRITE, CAP_READ);
-    // The shared heap can be mapped read-write, but can't be truncated.
-    limit_fd(shm_fd, CAP_MMAP_RW);
-    limit_fd(pagemap_mem, CAP_MMAP_R);
-    // The library must be parseable and mappable by rtld
-    limit_fd(library, CAP_READ, CAP_FSTAT, CAP_SEEK, CAP_MMAP_RX);
-    // The libraries implicitly opened from the library directories inherit
-    // the permissions from the parent directory descriptors.  These need the
-    // permissions required to map a library and also the permissions
-    // required to search the directory to find the relevant libraries.
-    for (auto libfd : libdirfds)
-    {
-      limit_fd(libfd, CAP_READ, CAP_FSTAT, CAP_LOOKUP, CAP_MMAP_RX);
-    }
-#endif
+    platform::SandboxCapsicum sb;
+    sb.restrict_file_descriptors(libdirs, libdirfds);
     closefrom(last_fd);
     // Prepare the arguments to main.  These are going to be the binary name,
     // the address of the shared memory region, the length of the shared
@@ -702,8 +630,7 @@ namespace sandbox
     static_assert(
       libdirfds.size() == 3,
       "Number of entries in LD_LIBRARY_PATH_FDS is incorrect");
-    const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location,
-    nullptr};
+    const char* const env[] = {"LD_LIBRARY_PATH_FDS=8:9:10", location, nullptr};
     execve(librunnerpath, args, const_cast<char* const*>(env));
     // Should be unreachable, but just in case we failed to exec, don't return
     // from here (returning from a vfork context is very bad!).
