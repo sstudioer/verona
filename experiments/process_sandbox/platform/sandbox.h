@@ -1,5 +1,6 @@
 // Copyright Microsoft and Project Verona Contributors.
 // SPDX-License-Identifier: MIT
+#pragma once
 
 /**
  * This file contains the definition of a per-platform sandboxing policy.

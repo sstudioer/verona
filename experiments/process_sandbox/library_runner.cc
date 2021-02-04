@@ -59,6 +59,16 @@ namespace
 }
 #endif
 
+extern "C"
+{
+  /**
+   * The `environ` symbol is exported by libc, but not exposed in any header.
+   *  We need to access this directly during bootstrap, when the libc functions
+   *  that access it may not yet be ready.
+   */
+  extern char** environ;
+}
+
 namespace snmalloc
 {
   template<typename T>
@@ -229,9 +239,12 @@ sandbox::ProxyPageMap sandbox::ProxyPageMap::p;
 #define SNMALLOC_DEFAULT_CHUNKMAP sandbox::ProxyPageMap
 #define SNMALLOC_DEFAULT_MEMORY_PROVIDER struct sandbox::MemoryProviderProxy
 #define SNMALLOC_USE_THREAD_CLEANUP 1
-#include "libsandbox.cc"
+#include "host_service_calls.h"
 #include "override/malloc.cc"
+#include "platform/platform.h"
+#include "sandbox.hh"
 #include "shared.h"
+#include "shared_memory_region.h"
 
 using namespace snmalloc;
 using namespace sandbox;

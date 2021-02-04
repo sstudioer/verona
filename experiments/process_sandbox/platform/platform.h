@@ -112,3 +112,4 @@ namespace sandbox
 #include "child_process.h"
 #include "poller.h"
 #include "shm.h"
+#include "sandbox.h"
