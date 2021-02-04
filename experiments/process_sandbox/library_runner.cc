@@ -20,6 +20,8 @@
 
 using address_t = snmalloc::Aal::address_t;
 
+// A few small platform-specific tweaks that aren't yet worth adding to the
+// platform abstraction layer.
 #ifdef __FreeBSD__
 // On FreeBSD, libc interposes on some system calls and does so in a way that
 // causes them to segfault if they are invoked before libc is fully
