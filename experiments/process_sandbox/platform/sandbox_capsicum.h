@@ -1,7 +1,10 @@
+// Copyright Microsoft and Project Verona Contributors.
+// SPDX-License-Identifier: MIT
 
 #if __has_include(<sys/capsicum.h>)
+#  include "../sandbox_fd_numbers.h"
+
 #  include <sys/capsicum.h>
-#include "../sandbox_fd_numbers.h"
 namespace sandbox
 {
   namespace platform

@@ -1,16 +1,16 @@
 // Copyright Microsoft and Project Verona Contributors.
 // SPDX-License-Identifier: MIT
 
+#include <aal/aal.h>
 #include <assert.h>
 #include <dlfcn.h>
+#include <ds/bits.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pal/pal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <aal/aal.h>
-#include <ds/bits.h>
-#include <pal/pal.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -25,6 +25,38 @@ extern "C" ssize_t __sys_write(int fd, const void* buf, size_t nbytes);
 extern "C" ssize_t __sys_read(int fd, void* buf, size_t nbytes);
 #  define write __sys_write
 #  define read __sys_read
+#elif defined(__linux__)
+namespace
+{
+  /**
+   * Linux run-time linkers do not currently support fdlopen, but it can be
+   * emulated with a wrapper that relies on procfs.  Each fd open in a
+   * process exists as a file (typically a symlink) in /proc/{pid}/fd/{fd
+   * number}, so we can open that.  This does depend on the running process
+   * having access to its own procfs entries, which may be a problem for some
+   * possible sandboxing approaches.
+   */
+  void* fdlopen(int fd, int flags)
+  {
+    char* str;
+    asprintf(&str, "/proc/%d/fd/%d", (int)getpid(), fd);
+    void* ret = dlopen(str, flags);
+    free(str);
+    return ret;
+  }
+  typedef void (*dlfunc_t)(void);
+
+  /**
+   * It is undefined behaviour in C to cast from a `void*` to a function
+   * pointer, but POSIX only provides a single function to get a pointer from a
+   * library.  BSD systems provide `dlfunc` to avoid this but glibc does not,
+   * so we provide our own.
+   */
+  dlfunc_t dlfunc(void* handle, const char* symbol)
+  {
+    return (dlfunc_t)dlsym(handle, symbol);
+  }
+}
 #endif
 
 namespace snmalloc
@@ -206,37 +238,6 @@ using namespace sandbox;
 
 namespace
 {
-#ifdef __linux__
-  /**
-   * Linux run-time linkers do not currently support fdlopen, but it can be
-   * emulated with a wrapper that relies on procfs.  Each fd open in a
-   * process exists as a file (typically a symlink) in /proc/{pid}/fd/{fd
-   * number}, so we can open that.  This does depend on the running process
-   * having access to its own procfs entries, which may be a problem for some
-   * possible sandboxing approaches.
-   */
-  void* fdlopen(int fd, int flags)
-  {
-    char* str;
-    asprintf(&str, "/proc/%d/fd/%d", (int)getpid(), fd);
-    void* ret = dlopen(str, flags);
-    free(str);
-    return ret;
-  }
-  typedef void (*dlfunc_t)(void);
-
-  /**
-   * It is undefined behaviour in C to cast from a `void*` to a function
-   * pointer, but POSIX only provides a single function to get a pointer from a
-   * library.  BSD systems provide `dlfunc` to avoid this but glibc does not,
-   * so we provide our own.
-   */
-  dlfunc_t dlfunc(void* handle, const char* symbol)
-  {
-    return (dlfunc_t)dlsym(handle, symbol);
-  }
-#endif
-
   /**
    * Flag indicating that bootstrapping has finished.  Note that we cannot
    * create any threads until after malloc is set up and so this does not need

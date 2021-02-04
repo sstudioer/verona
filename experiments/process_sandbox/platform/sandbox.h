@@ -1,3 +1,13 @@
+// Copyright Microsoft and Project Verona Contributors.
+// SPDX-License-Identifier: MIT
+
+/**
+ * This file contains the definition of a per-platform sandboxing policy.
+ * Because this interface currently has only one implementation, it is almost
+ * certainly the wrong abstraction and will change when others (e.g.
+ * seccomp-bpf) are added.
+ */
+
 #include "sandbox_capsicum.h"
 
 namespace sandbox

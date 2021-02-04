@@ -1,3 +1,5 @@
+// Copyright Microsoft and Project Verona Contributors.
+// SPDX-License-Identifier: MIT
 
 /**
  * Shared memory interface.  This file exposes a platform-specific class with

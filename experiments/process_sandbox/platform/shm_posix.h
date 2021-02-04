@@ -1,3 +1,5 @@
+// Copyright Microsoft and Project Verona Contributors.
+// SPDX-License-Identifier: MIT
 #ifdef __unix__
 #  include <fcntl.h>
 #  include <sys/mman.h>
